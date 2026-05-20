@@ -253,15 +253,7 @@ def build_m3u_index(m3u_channels):
 # ---------------- upstream EPG handling ----------------
 
 def fetch(url: str, dest: Path):
-    """Download with retries. Handles file:// URLs by copying from source."""
-    import shutil
-    import urllib.parse
-    if url.startswith("file://"):
-        src = Path(urllib.parse.urlparse(url).path)
-        if src.resolve() == dest.resolve():
-            return dest
-        shutil.copyfile(src, dest)
-        return dest
+    """Download with retries."""
     last_err = None
     for attempt in range(3):
         try:
@@ -625,6 +617,81 @@ def main():
             kept_ids.add(cid)
     kept_programmes.extend(dummy_programmes)
     print(f"      added {len(dummy_channels)} dummy channels × {n_blocks} blocks = {len(dummy_programmes)} programmes")
+
+    # ---------- gap-fill pass ----------
+    # Channels with REAL EPG sometimes have coverage gaps (e.g. provider EPG
+    # is missing a programme for "now" but has entries before and after).
+    # Many players show "data unavailable" during such gaps. We fill every
+    # gap with a "No EPG" dummy programme so the grid stays uniform.
+    print(f"[5d]  gap-fill pass")
+    PROG_TIMES_RE = re.compile(
+        rb'<programme\s+start="(\d{14}[^"]*)"\s+stop="(\d{14}[^"]*)"[^>]*channel="([^"]+)"'
+    )
+    TIME_PARSE_RE = re.compile(r"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-]\d{4}|Z))?")
+
+    def parse_xmltv(s: str) -> dt.datetime:
+        m = TIME_PARSE_RE.match(s)
+        if not m:
+            return None
+        y, mo, d, h, mi, sec = (int(m.group(i)) for i in range(1, 7))
+        offset_str = m.group(7) or "+0000"
+        t = dt.datetime(y, mo, d, h, mi, sec, tzinfo=dt.timezone.utc)
+        if offset_str == "Z":
+            return t
+        sign = 1 if offset_str[0] == "+" else -1
+        oh, om = int(offset_str[1:3]), int(offset_str[3:5])
+        return t - sign * dt.timedelta(hours=oh, minutes=om)
+
+    series_stop_utc = series_start_utc + dt.timedelta(days=DAYS_AHEAD)
+
+    ch_progs: dict[str, list] = defaultdict(list)
+    for p in kept_programmes:
+        m = PROG_TIMES_RE.search(p)
+        if not m:
+            continue
+        start = parse_xmltv(m.group(1).decode())
+        stop = parse_xmltv(m.group(2).decode())
+        if start is None or stop is None:
+            continue
+        cid = m.group(3).decode("utf-8", "replace")
+        ch_progs[cid].append((start, stop))
+
+    def gap_blocks(start: dt.datetime, end: dt.datetime, cid_xml: str) -> list[bytes]:
+        """Split [start, end) into BLOCK_HOURS-sized chunks of dummy programmes."""
+        out = []
+        cur = start
+        while cur < end:
+            nxt = min(cur + dt.timedelta(hours=BLOCK_HOURS), end)
+            s_str = fmt_xmltv_time(cur)
+            e_str = fmt_xmltv_time(nxt)
+            out.append(
+                f'<programme start="{s_str}" stop="{e_str}" channel="{cid_xml}">'
+                f'<title lang="en">No EPG</title></programme>'.encode("utf-8")
+            )
+            cur = nxt
+        return out
+
+    gap_fill_programmes: list[bytes] = []
+    channels_with_gaps = 0
+    for cid, items in ch_progs.items():
+        items.sort(key=lambda x: x[0])
+        cid_xml = html.escape(cid, quote=True)
+        had_gap = False
+        cursor = series_start_utc
+        for start, stop in items:
+            if start > cursor:
+                gap_fill_programmes.extend(gap_blocks(cursor, min(start, series_stop_utc), cid_xml))
+                had_gap = True
+            cursor = max(cursor, stop)
+            if cursor >= series_stop_utc:
+                break
+        if cursor < series_stop_utc:
+            gap_fill_programmes.extend(gap_blocks(cursor, series_stop_utc, cid_xml))
+            had_gap = True
+        if had_gap:
+            channels_with_gaps += 1
+    kept_programmes.extend(gap_fill_programmes)
+    print(f"      filled gaps in {channels_with_gaps} channels (+{len(gap_fill_programmes)} dummy programmes)")
 
     print(f"[6/6] writing output...")
     out_xml = out_dir / "guide.xml"
