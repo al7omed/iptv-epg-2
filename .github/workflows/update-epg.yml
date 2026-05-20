@@ -57,6 +57,10 @@ jobs:
       - name: Build EPG
         env:
           M3U_URL: file://${{ github.workspace }}/epg-work/playlist.m3u
+          # Keep only AR, US, UK groups. Pattern: starts with AR, US, or UK
+          # followed by a non-letter (space/colon/end-of-string). Tweak here
+          # if you want to broaden the lineup.
+          M3U_GROUP_FILTER: '^(AR|US|UK)(\b|[:_ -])'
         run: python3 scripts/build_epg.py
 
       - name: Stats

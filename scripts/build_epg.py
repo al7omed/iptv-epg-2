@@ -253,7 +253,16 @@ def build_m3u_index(m3u_channels):
 # ---------------- upstream EPG handling ----------------
 
 def fetch(url: str, dest: Path):
-    """Download with retries."""
+    """Download with retries. Handles file:// URLs by copying from source."""
+    import shutil
+    import urllib.parse
+    # Fast path for file:// — skip urllib entirely to avoid races when src==dest.
+    if url.startswith("file://"):
+        src = Path(urllib.parse.urlparse(url).path)
+        if src.resolve() == dest.resolve():
+            return dest
+        shutil.copyfile(src, dest)
+        return dest
     last_err = None
     for attempt in range(3):
         try:
@@ -348,6 +357,17 @@ def main():
     m3u_text = m3u_path.read_text(encoding="utf-8", errors="replace")
     m3u_channels = parse_m3u(m3u_text)
     print(f"      M3U entries: {len(m3u_channels)}")
+
+    # Optional group filter: env var M3U_GROUP_FILTER is a regex applied to
+    # each entry's group-title. Entries that don't match are dropped before
+    # any further processing — they get no EPG, no dummy, nothing.
+    group_filter = os.environ.get("M3U_GROUP_FILTER", "").strip()
+    if group_filter:
+        pat = re.compile(group_filter, re.IGNORECASE)
+        before = len(m3u_channels)
+        m3u_channels = [ch for ch in m3u_channels if pat.search(ch.get("group", ""))]
+        print(f"      group filter '{group_filter}': kept {len(m3u_channels)} / {before}")
+
     auto_n = assign_effective_ids(m3u_channels)
     print(f"      effective ids assigned: {len(m3u_channels) - auto_n} from M3U, {auto_n} auto-generated")
     tvg_ids, norm_names, callsigns = build_m3u_index(m3u_channels)
