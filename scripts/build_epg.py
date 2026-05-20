@@ -673,7 +673,10 @@ def main():
 
     gap_fill_programmes: list[bytes] = []
     channels_with_gaps = 0
-    for cid, items in ch_progs.items():
+    # Iterate ALL channels in kept_ids (not just those with programmes) so
+    # backfilled channels whose source had zero programmes still get filler.
+    for cid in kept_ids:
+        items = ch_progs.get(cid, [])
         items.sort(key=lambda x: x[0])
         cid_xml = html.escape(cid, quote=True)
         had_gap = False
