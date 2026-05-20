@@ -10,12 +10,6 @@ Self-updating unified XMLTV EPG for the second IPTV subscription (World 8K / mil
 https://al7omed.github.io/iptv-epg-2/guide.xml.gz
 ```
 
-**EPG fallback** (titles only, uncompressed):
-
-```
-https://al7omed.github.io/iptv-epg-2/guide.xml
-```
-
 ## Patching your M3U for full coverage
 
 Your subscription's M3U has ~54k streams. Many lack a `tvg-id` in the original — the player can't bind them to EPG without one. The build publishes a non-sensitive map at:
