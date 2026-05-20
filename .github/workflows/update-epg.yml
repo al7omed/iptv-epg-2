@@ -1,0 +1,84 @@
+name: Update EPG
+
+on:
+  schedule:
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/update-epg.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-epg
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      M3U_URL: ${{ secrets.M3U_URL }}
+      PROVIDER_EPG_URL: ${{ secrets.PROVIDER_EPG_URL }}
+      XTREAM_HOST: ${{ secrets.XTREAM_HOST }}
+      XTREAM_USER: ${{ secrets.XTREAM_USER }}
+      XTREAM_PASS: ${{ secrets.XTREAM_PASS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch or synthesize M3U
+        run: |
+          mkdir -p epg-work
+          # Provider's /get.php is sometimes blocked by Cloudflare WAF (HTTP 884)
+          # depending on origin IP. Try direct fetch first, fall back to Xtream API.
+          if curl -fsSL --max-time 90 -A "VLC/3.0.18 LibVLC/3.0.18" \
+              "$M3U_URL" -o epg-work/playlist.m3u; then
+            echo "M3U direct fetch OK: $(wc -c < epg-work/playlist.m3u) bytes"
+          else
+            echo "M3U direct fetch failed; synthesizing from Xtream API..."
+            python3 scripts/synth_m3u_from_xtream.py > epg-work/playlist.m3u
+            echo "M3U synthesized: $(wc -c < epg-work/playlist.m3u) bytes"
+          fi
+          if ! grep -q "^#EXTINF" epg-work/playlist.m3u; then
+            echo "ERROR: no #EXTINF entries found"; exit 1
+          fi
+          echo "channels: $(grep -c '^#EXTINF' epg-work/playlist.m3u)"
+
+      - name: Build EPG
+        env:
+          M3U_URL: file://${{ github.workspace }}/epg-work/playlist.m3u
+        run: python3 scripts/build_epg.py
+
+      - name: Stats
+        run: |
+          echo "guide.xml:      $(stat -c '%s' docs/guide.xml) bytes"
+          echo "guide.xml.gz:   $(stat -c '%s' docs/guide.xml.gz) bytes"
+          echo "tvg-id-map.tsv: $(stat -c '%s' docs/tvg-id-map.tsv) bytes"
+          echo "channels:       $(grep -c '<channel ' docs/guide.xml)"
+          echo "programmes:     $(grep -c '<programme ' docs/guide.xml)"
+
+      - name: Ensure playlist.m3u stays purged
+        run: rm -f docs/playlist.m3u
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/guide.xml docs/guide.xml.gz docs/tvg-id-map.tsv
+          git rm --cached --ignore-unmatch docs/playlist.m3u >/dev/null 2>&1 || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update EPG + map $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
